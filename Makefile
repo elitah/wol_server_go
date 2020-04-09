@@ -21,4 +21,3 @@ clean:
 distclean:
 	@rm -rf bin
 	@go clean --modcache
-	@go clean
