@@ -52,6 +52,11 @@ var (
 	ErrEmptyWrite  = errors.New("empty write")
 )
 
+type OAuthStore struct {
+	Key    string
+	Secret string
+}
+
 type DeviceStore struct {
 	DeviceID string `json:"devid"`
 	Admin    string `json:"admin"`
@@ -672,8 +677,7 @@ type WolServer struct {
 	mPool   *ants.Pool
 	mListen net.Listener
 
-	mOAuthKey    string
-	mOAuthSecret string
+	mOAuthList map[string]*OAuthStore
 
 	mList map[string]*WolClient
 
@@ -685,14 +689,13 @@ type WolServer struct {
 	mCrossServerList map[string]*CrossServer
 }
 
-func NewWolServer(pool *ants.Pool, l net.Listener, uid, secret string) *WolServer {
+func NewWolServer(pool *ants.Pool, l net.Listener) *WolServer {
 	var aes_block cipher.Block
 
-	if "" != uid && "" != secret {
-		b := make([]byte, 16)
-		if _, err := rand.Read(b); nil == err {
-			aes_block, _ = aes.NewCipher(b)
-		}
+	var buffer [16]byte
+
+	if _, err := rand.Read(buffer[:]); nil == err {
+		aes_block, _ = aes.NewCipher(buffer[:])
 	}
 
 	os.Mkdir(exeDir+"/db", 0755)
@@ -701,8 +704,7 @@ func NewWolServer(pool *ants.Pool, l net.Listener, uid, secret string) *WolServe
 		mPool:   pool,
 		mListen: l,
 
-		mOAuthKey:    uid,
-		mOAuthSecret: secret,
+		mOAuthList: make(map[string]*OAuthStore),
 
 		mList: make(map[string]*WolClient),
 
@@ -711,6 +713,15 @@ func NewWolServer(pool *ants.Pool, l net.Listener, uid, secret string) *WolServe
 		mAES: aes_block,
 
 		mCrossServerList: make(map[string]*CrossServer),
+	}
+}
+
+func (this *WolServer) AddOAuth(domain, key, secret string) {
+	if "" != domain && "" != key && "" != secret {
+		this.mOAuthList[domain] = &OAuthStore{
+			Key:    key,
+			Secret: secret,
+		}
 	}
 }
 
@@ -1435,69 +1446,79 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			q := r.URL.Query()
 			if code := q.Get("code"); "" == code {
 				if result, ok := AESEncrypt(this.mAES, "oauth"); ok {
-					// https://github.com/login/oauth/authorize
-					v := url.Values{}
-					v.Set("client_id", this.mOAuthKey)
-					v.Set("state", result)
-					//v.Set("redirect_uri", fmt.Sprintf("https://%s/login", r.Host))
-					u := url.URL{
-						Scheme:   "https",
-						Host:     "github.com",
-						Path:     "/login/oauth/authorize",
-						RawQuery: v.Encode(),
+					if oauth, ok := this.mOAuthList[r.Host]; ok {
+						// https://github.com/login/oauth/authorize
+						v := url.Values{}
+						v.Set("client_id", oauth.Key)
+						v.Set("state", result)
+						//v.Set("redirect_uri", fmt.Sprintf("https://%s/login", r.Host))
+						u := url.URL{
+							Scheme:   "https",
+							Host:     "github.com",
+							Path:     "/login/oauth/authorize",
+							RawQuery: v.Encode(),
+						}
+						w.Header().Set("Location", u.String())
+						w.WriteHeader(http.StatusFound)
+						return
+					} else {
+						logs.Warn("invalid domain")
 					}
-					w.Header().Set("Location", u.String())
-					w.WriteHeader(http.StatusFound)
-					return
+				} else {
+					logs.Warn("unable encrypt state")
 				}
 			} else if err := q.Get("error"); "" != err {
 				logs.Warn(err)
 			} else if state := q.Get("state"); "" != state {
 				if _state, ok := AESDecrypt(this.mAES, state); ok && "oauth" == _state {
-					response1 := struct {
-						AccessToken string `json:"access_token"`
-						Scope       string `json:"scope"`
-						TokenType   string `json:"token_type"`
-					}{}
-					req := httplib.Get("https://github.com/login/oauth/access_token")
-					req.Param("client_id", this.mOAuthKey)
-					req.Param("client_secret", this.mOAuthSecret)
-					req.Param("code", code)
-					req.Header("Accept", "application/json")
-					if err := req.ToJSON(&response1); nil == err {
-						response2 := struct {
-							UserName  string `json:"login"`
-							UserID    int64  `json:"id"`
-							NodeID    string `json:"node_id"`
-							AvatarUrl string `json:"avatar_url"`
+					if oauth, ok := this.mOAuthList[r.Host]; ok {
+						response1 := struct {
+							AccessToken string `json:"access_token"`
+							Scope       string `json:"scope"`
+							TokenType   string `json:"token_type"`
 						}{}
-						req := httplib.Get("https://api.github.com/user")
+						req := httplib.Get("https://github.com/login/oauth/access_token")
+						req.Param("client_id", oauth.Key)
+						req.Param("client_secret", oauth.Secret)
+						req.Param("code", code)
 						req.Header("Accept", "application/json")
-						req.Header("Authorization", "token "+response1.AccessToken)
-						if err := req.ToJSON(&response2); nil == err {
-							v := url.Values{}
-							v.Set("username", response2.UserName)
-							v.Set("userid", fmt.Sprint(response2.UserID))
-							v.Set("nodeid", response2.NodeID)
-							v.Set("avatar_url", response2.AvatarUrl)
-							logs.Info(v.Encode())
-							if result, ok := AESEncrypt(this.mAES, "userinfo:"+v.Encode()); ok {
-								http.SetCookie(w, &http.Cookie{
-									Name:     "token",
-									Value:    result,
-									Path:     "/",
-									HttpOnly: true,
-									MaxAge:   30 * 86400,
-								})
-								w.Header().Set("Location", "/")
-								w.WriteHeader(http.StatusFound)
-								return
+						if err := req.ToJSON(&response1); nil == err {
+							response2 := struct {
+								UserName  string `json:"login"`
+								UserID    int64  `json:"id"`
+								NodeID    string `json:"node_id"`
+								AvatarUrl string `json:"avatar_url"`
+							}{}
+							req := httplib.Get("https://api.github.com/user")
+							req.Header("Accept", "application/json")
+							req.Header("Authorization", "token "+response1.AccessToken)
+							if err := req.ToJSON(&response2); nil == err {
+								v := url.Values{}
+								v.Set("username", response2.UserName)
+								v.Set("userid", fmt.Sprint(response2.UserID))
+								v.Set("nodeid", response2.NodeID)
+								v.Set("avatar_url", response2.AvatarUrl)
+								logs.Info(v.Encode())
+								if result, ok := AESEncrypt(this.mAES, "userinfo:"+v.Encode()); ok {
+									http.SetCookie(w, &http.Cookie{
+										Name:     "token",
+										Value:    result,
+										Path:     "/",
+										HttpOnly: true,
+										MaxAge:   30 * 86400,
+									})
+									w.Header().Set("Location", "/")
+									w.WriteHeader(http.StatusFound)
+									return
+								}
+							} else {
+								logs.Warn(err)
 							}
 						} else {
 							logs.Warn(err)
 						}
 					} else {
-						logs.Warn(err)
+						logs.Warn("invalid domain")
 					}
 				} else {
 					logs.Warn("invalid login state")
@@ -1788,14 +1809,12 @@ func main() {
 	var addrWol string
 	var addrHttp string
 
-	var oauthKey string
-	var oauthSecret string
+	var oauthList string
 
 	flag.BoolVar(&help, "h", false, "This Help.")
 	flag.StringVar(&addrWol, "l", ":4000", "wol listen address.")
 	flag.StringVar(&addrHttp, "p", ":80", "http listen address.")
-	flag.StringVar(&oauthKey, "oauth_key", "", "github OAuth client id.")
-	flag.StringVar(&oauthSecret, "oauth_secret", "", "github OAuth client secret.")
+	flag.StringVar(&oauthList, "o", "", "github OAuth node list.")
 
 	flag.Parse()
 
@@ -1829,7 +1848,17 @@ func main() {
 
 		panicError("无法监听TCP", err)
 
-		wol := NewWolServer(p, l_wol, oauthKey, oauthSecret)
+		wol := NewWolServer(p, l_wol)
+
+		if "" != oauthList {
+			if list := strings.Split(oauthList, ";"); 0 < len(list) {
+				for _, item := range list {
+					if arr := strings.Split(item, ":"); 3 <= len(arr) {
+						wol.AddOAuth(arr[0], arr[1], arr[2])
+					}
+				}
+			}
+		}
 
 		// 监听wol
 		p.Submit(func() {
