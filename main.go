@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 	"unicode"
@@ -59,6 +60,12 @@ type DeviceStore struct {
 type UserStore struct {
 	NodeID string      `json:"nodeid"`
 	Warns  []WarnStore `json:"warns"`
+}
+
+type WolStore struct {
+	NodeID   string   `json:"nodeid"`
+	Servers  []string `json:"servers"`
+	Machines []string `json:"machines"`
 }
 
 type WarnStore struct {
@@ -96,6 +103,385 @@ func AESDecrypt(b cipher.Block, text string) (string, bool) {
 		return fmt.Sprintf("%s", ciphertext), true
 	}
 	return "", false
+}
+
+func HTMLBody(w http.ResponseWriter, body string) {
+	fmt.Fprintf(w, `<html>
+	<body>
+		%s
+	</body>
+</html>`, body)
+}
+
+func JsAlert(w http.ResponseWriter, args ...string) {
+	if 1 <= len(args) {
+		//
+		var location string = "/"
+		//
+		if 2 <= len(args) {
+			location = args[1]
+		}
+		//
+		fmt.Fprintf(w, `<html>
+	<body>
+		<script>
+		alert("%s");
+		window.location.href="%s";
+		</script>
+	</body>
+</html>`, args[0], location)
+	}
+}
+
+type CrossDevice struct {
+	key string
+
+	ssid string
+
+	lan_ip string
+}
+
+type CrossServer struct {
+	sync.RWMutex
+
+	address string
+
+	conn net.Conn
+
+	flag uint32
+
+	lastupdate time.Time
+	lastusing  time.Time
+
+	devices []*CrossDevice
+}
+
+func (this *CrossServer) Close() {
+	//
+	this.Lock()
+	//
+	if nil != this.conn {
+		this.conn.Close()
+	}
+	//
+	this.devices = nil
+	//
+	this.Unlock()
+}
+
+func (this *CrossServer) GetConn() net.Conn {
+	this.RLock()
+	conn := this.conn
+	this.RUnlock()
+
+	if nil == conn {
+		logs.Warn("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+		//
+		if _conn, err := net.DialTimeout("tcp", this.address, 3*time.Second); nil == err {
+			var buffer [1024]byte
+			//
+			this.Lock()
+			//
+			this.lastusing = time.Now()
+			//
+			_conn.Write([]byte(`{"cmd":"beat"}`))
+			//
+			_conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+			//
+			if n, err := _conn.Read(buffer[:]); nil == err {
+				if 0 < n {
+					var result = struct {
+						Status bool `json:"status"`
+					}{}
+					//
+					logs.Warn(string(buffer[:n]))
+					//
+					if err := json.Unmarshal(buffer[:n], &result); nil == err {
+						if result.Status {
+							conn = _conn
+							this.conn = _conn
+
+							//
+							go func(conn net.Conn) {
+								if nil != conn {
+									var buffer [1024]byte
+									for {
+										time.Sleep(7 * time.Second)
+										//
+										this.Lock()
+										//
+										since := time.Since(this.lastusing)
+										//
+										logs.Info(since)
+										//
+										if 1*time.Minute > since {
+											//
+											conn.Write([]byte(`{"cmd":"beat"}`))
+											//
+											_conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+											//
+											if n, err := _conn.Read(buffer[:]); nil == err {
+												if 0 < n {
+													var result = struct {
+														Status bool `json:"status"`
+													}{}
+													//
+													logs.Warn(string(buffer[:n]))
+													if err := json.Unmarshal(buffer[:n], &result); nil == err {
+														if result.Status {
+															//
+															this.Unlock()
+															//
+															continue
+														} else {
+															logs.Warn(err)
+														}
+													} else {
+														logs.Warn(err)
+													}
+												} else {
+													logs.Warn("short read")
+												}
+											} else {
+												logs.Warn(err)
+											}
+										}
+										// 取消连接
+										this.conn = nil
+										// 关闭连接
+										conn.Close()
+										// 解锁
+										this.Unlock()
+										//
+										logs.Warn("connection closed")
+										// 跳出
+										break
+									}
+								}
+							}(_conn)
+						}
+					}
+				}
+			}
+			//
+			this.Unlock()
+		}
+	} else {
+		//
+		this.Lock()
+		//
+		this.lastusing = time.Now()
+		//
+		this.Unlock()
+	}
+
+	return conn
+}
+
+func (this *CrossServer) Wakeup(key, mac string) bool {
+	if "" != key && "" != mac {
+		for _, item := range this.devices {
+			if key == item.key {
+				if conn := this.GetConn(); nil != conn {
+					var buffer [1024]byte
+					//
+					this.Lock()
+					//
+					defer this.Unlock()
+					//
+					if data, err := json.Marshal(struct {
+						Cmd string `json:"cmd"`
+						Key string `json:"key"`
+						Mac string `json:"mac"`
+					}{
+						Cmd: "wol",
+						Key: key,
+						Mac: mac,
+					}); nil == err {
+						//
+						conn.Write(data)
+						//
+						conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+						//
+						if n, err := conn.Read(buffer[:]); nil == err {
+							if 0 < n {
+								var result = struct {
+									Status bool `json:"status"`
+								}{}
+								//
+								logs.Warn(string(buffer[:n]))
+								//
+								if err := json.Unmarshal(buffer[:n], &result); nil == err {
+									return result.Status
+								} else {
+									logs.Warn(err)
+								}
+							} else {
+								logs.Warn("short read")
+							}
+						} else {
+							logs.Warn(err)
+						}
+					} else {
+						logs.Warn(err)
+					}
+				} else {
+					logs.Warn("no conn")
+				}
+			}
+		}
+	}
+
+	return false
+}
+
+func (this *CrossServer) Update(flags ...bool) bool {
+	if 0 == len(flags) || !flags[0] {
+		if 3*time.Minute > time.Since(this.lastupdate) {
+			return true
+		}
+	}
+	if atomic.CompareAndSwapUint32(&this.flag, 0x0, 0x1) {
+		go func() {
+			defer func() {
+				atomic.StoreUint32(&this.flag, 0x0)
+			}()
+
+			if conn := this.GetConn(); nil != conn {
+				var buffer [4096]byte
+				//
+				this.Lock()
+				//
+				defer this.Unlock()
+				//
+				conn.Write([]byte(`{"cmd":"client_list"}`))
+				//
+				conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+				//
+				if n, err := conn.Read(buffer[:]); nil == err {
+					if 0 < n {
+						type node struct {
+							Key   string `json:"key"`
+							SSID  string `json:"ssid"`
+							LanIP string `json:"lan_ip"`
+						}
+						result := struct {
+							Status   bool `json:"status"`
+							Response struct {
+								Count int64  `json:"count"`
+								List  []node `json:"list"`
+							} `json:"response"`
+						}{}
+						//
+						logs.Warn(string(buffer[:n]))
+						//
+						if err := json.Unmarshal(buffer[:n], &result); nil == err {
+							//
+							if result.Status {
+								//
+								this.devices = nil
+								//
+								for _, item := range result.Response.List {
+									this.devices = append(this.devices, &CrossDevice{
+										key:    item.Key,
+										ssid:   item.SSID,
+										lan_ip: item.LanIP,
+									})
+								}
+								//
+								this.lastupdate = time.Now()
+							}
+						} else {
+							logs.Error(err)
+						}
+					} else {
+						logs.Error("empty read")
+					}
+				} else {
+					logs.Error(err)
+				}
+			} else {
+				logs.Error("no conn")
+			}
+		}()
+		return true
+	}
+	return false
+}
+
+func (this *CrossServer) HTML(r *http.Request, machines []string, table bool) string {
+	//
+	var ss strings.Builder
+	//
+	if 0x0 != atomic.LoadUint32(&this.flag) {
+		//
+		ctx, _ := context.WithTimeout(r.Context(), 5*time.Second)
+		//
+		for 0x0 != atomic.LoadUint32(&this.flag) {
+			select {
+			case <-ctx.Done():
+				return "<h3>超时!</h3>"
+			case <-time.After(1 * time.Second):
+				logs.Info("retry check...")
+			}
+		}
+	}
+	//
+	if table {
+		//
+		v := url.Values{}
+		//
+		v.Set("address", this.address)
+		//
+		fmt.Fprintf(&ss, `<div style="padding: 1em; margin-bottom: 3em; border: 2px solid #ccc; background-color: #eee;">
+			<h3 style="display: inline-block; position: relative; top: -1.7em; color: #f00; background-color: #eee;">客户端列表</h3>
+			<p><a href="/wol_update?%s">强制刷新</a> | <a href="/">回到首页</a></p>
+			<table>`, v.Encode())
+		//
+		for _, item := range this.devices {
+			v.Set("key", item.key)
+
+			fmt.Fprintf(&ss, `
+				<tr>
+					<td>%s<td>
+					<td>%s<td>
+					<td>%s<td>
+					<td>
+						<select onchange="device_wakeup(this);">
+							<option value="_">---请选择---</option>`, item.key, item.ssid, item.lan_ip)
+
+			for _, item := range machines {
+				v.Set("mac", item)
+
+				fmt.Fprintf(&ss, `
+							<option value="%s">%s</option>`, v.Encode(), item)
+			}
+
+			fmt.Fprintf(&ss, `
+						</select>
+					</td>
+				</tr>`)
+		}
+		//
+		ss.WriteString(`
+			</table>
+		</div>
+		<script>
+		function device_wakeup(dom) {
+			if ('_' != dom.value) {
+				if (confirm('确认吗?')) {
+					window.location.href = '/wol_wakeup?' + dom.value;
+				}
+				dom.value = '_';
+			}
+		}
+		</script>`)
+	} else {
+		for _, item := range this.devices {
+			fmt.Fprintf(&ss, "<p>Key: %s, SSID: %s, Lan ip: %s</p>", item.key, item.ssid, item.lan_ip)
+		}
+	}
+	return ss.String()
 }
 
 type BoolWait struct {
@@ -295,6 +681,8 @@ type WolServer struct {
 	mCE   chan struct{}
 
 	mAES cipher.Block
+
+	mCrossServerList map[string]*CrossServer
 }
 
 func NewWolServer(pool *ants.Pool, l net.Listener, uid, secret string) *WolServer {
@@ -321,6 +709,8 @@ func NewWolServer(pool *ants.Pool, l net.Listener, uid, secret string) *WolServe
 		mCE: make(chan struct{}),
 
 		mAES: aes_block,
+
+		mCrossServerList: make(map[string]*CrossServer),
 	}
 }
 
@@ -621,72 +1011,24 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 	this.listDel(devid)
 }
 
-func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	logs.Info(r.URL)
-
-	defer func() {
-		r.Header = nil
-	}()
-
-	switch r.URL.Path {
-	case "/":
-		if nil != this.mAES {
-			//logs.Info(r.Header.Get("cookie"))
-			if c, err := r.Cookie("token"); nil == err && "" != c.Value {
-				//logs.Info(c.Value)
-				if userinfo, ok := AESDecrypt(this.mAES, c.Value); ok {
-					if strings.HasPrefix(userinfo, "userinfo:") {
-						userinfo = userinfo[9:]
-						if u, err := url.ParseQuery(userinfo); nil == err {
-							if username := u.Get("username"); "" != username {
-								logs.Info("username", username)
-								logs.Info("userid", u.Get("userid"))
-								logs.Info("nodeid", u.Get("nodeid"))
-								logs.Info("avatar_url", u.Get("avatar_url"))
-								if tmpl, err := template.ParseFiles(exeDir + "/index.tpl"); nil == err {
-									// 用户配置
-									j := UserStore{}
-									// 读取配置文件
-									if nodeid := u.Get("nodeid"); "" != nodeid {
-										if data, err := ioutil.ReadFile(exeDir + "/db/user_" + nodeid + ".json"); nil == err {
-											if err := json.Unmarshal(data, &j); nil != err {
-												logs.Warn(err)
-											}
-										} else {
-											logs.Warn(err)
-										}
-									}
-									if err = tmpl.Execute(w, struct {
-										UserName  string
-										UserID    string
-										NodeID    string
-										AvatarUrl string
-										WarnList  []WarnStore
-									}{
-										UserName:  u.Get("username"),
-										UserID:    u.Get("userid"),
-										NodeID:    u.Get("nodeid"),
-										AvatarUrl: u.Get("avatar_url"),
-										WarnList:  j.Warns,
-									}); nil == err {
-										return
-									} else {
-										logs.Warn(err)
-									}
-								} else {
-									logs.Warn(err)
-								}
-								fmt.Fprint(w, `<html>
-	<body>
-		<h3>页面无法加载</h3>
-	</body>
-</html>`)
-								return
+func (this *WolServer) GetUserInfo(r *http.Request) *url.Values {
+	if nil != this.mAES {
+		//logs.Info(r.Header.Get("cookie"))
+		if c, err := r.Cookie("token"); nil == err && "" != c.Value {
+			//logs.Info(c.Value)
+			if userinfo, ok := AESDecrypt(this.mAES, c.Value); ok {
+				if strings.HasPrefix(userinfo, "userinfo:") {
+					userinfo = userinfo[9:]
+					if u, err := url.ParseQuery(userinfo); nil == err {
+						if username := u.Get("username"); "" != username {
+							// 读取配置文件
+							if nodeid := u.Get("nodeid"); "" != nodeid {
+								return &u
 							} else {
-								logs.Warn("invalid username")
+								logs.Warn("invalid nodeid")
 							}
 						} else {
-							logs.Warn(err)
+							logs.Warn("invalid username")
 						}
 					} else {
 						logs.Warn("not userinfo")
@@ -697,12 +1039,352 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			} else {
 				logs.Warn(err)
 			}
+		} else {
+			logs.Warn(err)
+		}
+	}
+	return nil
+}
+
+func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	logs.Info(r.URL)
+
+	defer func() {
+		r.Header = nil
+	}()
+
+	switch r.URL.Path {
+	case "/":
+		if u := this.GetUserInfo(r); nil != u {
+			logs.Info("username", u.Get("username"))
+			logs.Info("userid", u.Get("userid"))
+			logs.Info("nodeid", u.Get("nodeid"))
+			logs.Info("avatar_url", u.Get("avatar_url"))
+			if tmpl, err := template.ParseFiles(exeDir + "/index.tpl"); nil == err {
+				// 用户配置
+				ui := UserStore{}
+				wol := WolStore{}
+				// 读取配置文件
+				if nodeid := u.Get("nodeid"); "" != nodeid {
+					if data, err := ioutil.ReadFile(exeDir + "/db/user_" + nodeid + ".json"); nil == err {
+						if err := json.Unmarshal(data, &ui); nil != err {
+							logs.Warn(err)
+						}
+					} else {
+						logs.Warn(err)
+					}
+					if data, err := ioutil.ReadFile(exeDir + "/db/wol_" + nodeid + ".json"); nil == err {
+						if err := json.Unmarshal(data, &wol); nil == err {
+							for _, item := range wol.Servers {
+								if _, ok := this.mCrossServerList[item]; !ok {
+									this.mCrossServerList[item] = &CrossServer{address: item}
+								}
+							}
+						} else {
+							logs.Warn(err)
+						}
+					} else {
+						logs.Warn(err)
+					}
+				}
+				if err = tmpl.Execute(w, struct {
+					UserName   string
+					UserID     string
+					NodeID     string
+					AvatarUrl  string
+					WarnList   []WarnStore
+					ServerList []string
+				}{
+					UserName:   u.Get("username"),
+					UserID:     u.Get("userid"),
+					NodeID:     u.Get("nodeid"),
+					AvatarUrl:  u.Get("avatar_url"),
+					WarnList:   ui.Warns,
+					ServerList: wol.Servers,
+				}); nil == err {
+					return
+				} else {
+					logs.Warn(err)
+				}
+			} else {
+				logs.Warn(err)
+			}
+			//
+			HTMLBody(w, "<h3>页面无法加载</h3>")
+			//
+			return
 		}
 		w.Header().Set("Location", "/login")
 		w.WriteHeader(http.StatusFound)
 		return
 	case "/favicon.ico":
 		http.NotFound(w, r)
+		return
+	case "/wol_add", "/wol_del":
+		address := r.URL.Query().Get("address")
+		mac := r.URL.Query().Get("mac")
+		//
+		if "" != address || "" != mac {
+			if "" != address {
+				for {
+					if host, port, _ := net.SplitHostPort(address); "" != host && "" != port {
+						if i, err := strconv.Atoi(port); nil == err {
+							if 2 <= strings.Count(host, ".") && 0 < i && 65535 >= i {
+								break
+							}
+						}
+					}
+					address = ""
+					break
+				}
+			}
+			if "" != mac {
+				if 17 == len(mac) {
+					for i := 0; 17 > i; i++ {
+						logs.Info(mac[i])
+						switch mac[i] {
+						case '0', '1', '2', '3', '4', '5', '6', '7', '8', '9':
+						case 'a', 'b', 'c', 'd', 'e', 'f':
+						case 'A', 'B', 'C', 'D', 'E', 'F':
+						case '-', ':':
+						default:
+							mac = ""
+							i = 9999
+						}
+					}
+				}
+			}
+			if "" != address || "" != mac {
+				if u := this.GetUserInfo(r); nil != u {
+					if nodeid := u.Get("nodeid"); "" != nodeid {
+						wol := WolStore{}
+						if data, err := ioutil.ReadFile(exeDir + "/db/wol_" + nodeid + ".json"); nil == err {
+							if err := json.Unmarshal(data, &wol); nil != err {
+								logs.Warn(err)
+							}
+						} else {
+							if f, err := os.OpenFile(exeDir+"/db/wol_"+nodeid+".json", os.O_RDWR|os.O_CREATE, 0644); nil == err {
+								f.Truncate(0)
+								f.Close()
+							}
+							logs.Warn(err)
+						}
+						if "/wol_add" == r.URL.Path {
+							if "" != address {
+								if 0 < len(wol.Servers) {
+									for _, item := range wol.Servers {
+										if address == item {
+											address = ""
+											break
+										}
+									}
+								}
+							}
+							if "" != mac {
+								if 0 < len(wol.Machines) {
+									for _, item := range wol.Machines {
+										if mac == item {
+											mac = ""
+											break
+										}
+									}
+								}
+							}
+						} else {
+							//
+							var ok = false
+							//
+							if "" != address {
+								if 0 < len(wol.Servers) {
+									for i, item := range wol.Servers {
+										if address == item {
+											if 1 == len(wol.Servers) {
+												wol.Servers = []string{}
+											} else {
+												_tmp := wol.Servers
+												wol.Servers = nil
+												wol.Servers = append(wol.Servers, _tmp[0:i]...)
+												wol.Servers = append(wol.Servers, _tmp[i+1:]...)
+											}
+											//
+											ok = true
+											//
+											break
+										}
+									}
+								}
+								if !ok {
+									address = ""
+								}
+							}
+							//
+							if "" != mac {
+								if 0 < len(wol.Machines) {
+									for i, item := range wol.Machines {
+										if address == item {
+											if 1 == len(wol.Machines) {
+												wol.Machines = []string{}
+											} else {
+												_tmp := wol.Machines
+												wol.Machines = nil
+												wol.Machines = append(wol.Machines, _tmp[0:i]...)
+												wol.Machines = append(wol.Machines, _tmp[i+1:]...)
+											}
+											//
+											ok = true
+											//
+											break
+										}
+									}
+								}
+								if !ok {
+									mac = ""
+								}
+							}
+						}
+						if "" != address || "" != mac {
+							//
+							wol.NodeID = nodeid
+							//
+							if "/wol_add" == r.URL.Path {
+								//
+								if "" != address {
+									wol.Servers = append(wol.Servers, address)
+								}
+								//
+								if "" != mac {
+									wol.Machines = append(wol.Machines, mac)
+								}
+							} else {
+								if "" != address {
+									if server, ok := this.mCrossServerList[address]; ok {
+										delete(this.mCrossServerList, address)
+
+										server.Close()
+									}
+								}
+							}
+							//
+							if data, err := json.Marshal(&wol); nil == err {
+								if err = ioutil.WriteFile(exeDir+"/db/wol_"+nodeid+".json", data, 0664); nil != err {
+									logs.Warn(err)
+								}
+							} else {
+								logs.Warn(err)
+							}
+						} else {
+							logs.Warn("不存在")
+						}
+						//
+						JsAlert(w, "成功!")
+						//
+						return
+					}
+				}
+				w.Header().Set("Location", "/login")
+				w.WriteHeader(http.StatusFound)
+				return
+			}
+		}
+		//
+		JsAlert(w, "您输入的地址无效!")
+		//
+		return
+	case "/wol_server":
+		if address := r.URL.Query().Get("address"); "" != address {
+			if u := this.GetUserInfo(r); nil != u {
+				// 读取配置文件
+				if nodeid := u.Get("nodeid"); "" != nodeid {
+					//
+					wol := WolStore{}
+					//
+					if data, err := ioutil.ReadFile(exeDir + "/db/wol_" + nodeid + ".json"); nil == err {
+						if err := json.Unmarshal(data, &wol); nil != err {
+							logs.Warn(err)
+						}
+					} else {
+						logs.Warn(err)
+					}
+					//
+					if server, ok := this.mCrossServerList[address]; ok {
+						//
+						server.Update()
+						//
+						HTMLBody(w, server.HTML(r, wol.Machines, true))
+					} else {
+						//
+						JsAlert(w, "没有找到!")
+					}
+					//
+					return
+				}
+			}
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		//
+		JsAlert(w, "没有找到!")
+		//
+		return
+	case "/wol_update":
+		if address := r.URL.Query().Get("address"); "" != address {
+			if server, ok := this.mCrossServerList[address]; ok {
+				if server.Update(true) {
+					v := url.Values{}
+					//
+					v.Set("address", address)
+					//
+					JsAlert(w, "查询中!", fmt.Sprintf("/wol_server?%s", v.Encode()))
+					//
+					return
+				}
+			}
+		}
+		//
+		JsAlert(w, "没有找到!")
+		//
+		return
+	case "/wol_wakeup":
+		if address := r.URL.Query().Get("address"); "" != address {
+			if key := r.URL.Query().Get("key"); "" != key {
+				if mac := r.URL.Query().Get("mac"); "" != mac {
+					if u := this.GetUserInfo(r); nil != u {
+						// 读取配置文件
+						if nodeid := u.Get("nodeid"); "" != nodeid {
+							//
+							wol := WolStore{}
+							//
+							if data, err := ioutil.ReadFile(exeDir + "/db/wol_" + nodeid + ".json"); nil == err {
+								if err := json.Unmarshal(data, &wol); nil != err {
+									logs.Warn(err)
+								}
+							} else {
+								logs.Warn(err)
+							}
+							//
+							for _, item := range wol.Machines {
+								if mac == item {
+									if server, ok := this.mCrossServerList[address]; ok {
+										if server.Wakeup(key, mac) {
+											v := url.Values{}
+											//
+											v.Set("address", address)
+											//
+											JsAlert(w, "指令已发出", fmt.Sprintf("/wol_server?%s", v.Encode()))
+											return
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+		//
+		JsAlert(w, "没有找到!")
+		//
 		return
 	case "/control":
 		q := r.URL.Query()
@@ -826,11 +1508,9 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		} else {
 			logs.Warn("no aes module avaiable")
 		}
-		fmt.Fprint(w, `<html>
-	<body>
-		<h3>无法登陆</h3>
-	</body>
-</html>`)
+		//
+		HTMLBody(w, "<h3>无法登陆</h3>")
+		//
 		return
 	case "/logout":
 		http.SetCookie(w, &http.Cookie{
@@ -840,11 +1520,9 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			HttpOnly: true,
 			MaxAge:   -1,
 		})
-		fmt.Fprint(w, `<html>
-<body>
-<h3>已退出</h3>
-</body>
-</html>`)
+		//
+		HTMLBody(w, "<h3>已退出</h3>")
+		//
 		return
 	}
 
@@ -1121,19 +1799,19 @@ func main() {
 
 	flag.Parse()
 
+	logs.SetLogger(logs.AdapterConsole, `{"level":99,"color":true}`)
+	logs.EnableFuncCallDepth(true)
+	logs.SetLogFuncCallDepth(3)
+	logs.Async()
+
+	defer logs.Close()
+
 	logs.Info(exeDir)
 
 	if help {
 		// for help
 	} else if "" != addrWol && "" != addrHttp {
 		var wg sync.WaitGroup
-
-		logs.SetLogger(logs.AdapterConsole, `{"level":99,"color":true}`)
-		logs.EnableFuncCallDepth(true)
-		logs.SetLogFuncCallDepth(3)
-		logs.Async()
-
-		defer logs.Close()
 
 		p, err := ants.NewPool(1000)
 
