@@ -555,6 +555,8 @@ type WolClient struct {
 
 	Admin string
 
+	warnCnt uint64
+
 	nextWarn time.Time
 }
 
@@ -591,6 +593,10 @@ func (this *WolClient) Warn() string {
 	}
 
 	return ""
+}
+
+func (this *WolClient) GetWarnCount() uint64 {
+	return atomic.AddUint64(&this.warnCnt, 1)
 }
 
 func (this *WolClient) HadAdmin() bool {
@@ -828,8 +834,6 @@ func (this *WolServer) Close() {
 func (this *WolServer) HandlerConn(conn net.Conn) {
 	var devid string
 
-	var warn_cnt int64
-
 	var nothing_to_send bool
 
 	buffer := make([]byte, 1024)
@@ -909,10 +913,9 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 														if j.Warns[i].DeviceID == devid {
 															if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 																if err := this.mPool.Submit(func() {
-																	warn_cnt++
 																	if result, err := httplib.Get("https://sc.ftqq.com/"+j.Warns[i].Key+".send").
-																		Param("text", fmt.Sprintf("%s (No.%d)", j.Warns[i].Title, warn_cnt)). // 通知标题
-																		Param("desp", j.Warns[i].Desp).                                       // 通知内容
+																		Param("text", fmt.Sprintf("%s (No.%d)", j.Warns[i].Title, c.GetWarnCount())). // 通知标题
+																		Param("desp", j.Warns[i].Desp).                                               // 通知内容
 																		String(); nil == err {
 																		//{"errno":0,"errmsg":"success","dataset":"done"}
 																		//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
