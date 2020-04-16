@@ -1,12 +1,45 @@
 
+_UPX_ENV ?= --no-env
+_UPX ?= $(shell which upx)
+
+ifneq ($(UPX),)
+_UPX := $(shell [ -f $(UPX) ] && echo $(UPX) || echo $(UPX)/upx)
+endif
+
+ifneq ($(_UPX),)
+_UPX := $(shell [ -x $(_UPX) ] && echo $(_UPX) || which upx)
+endif
+
+ifeq ($(UPX_FAST),)
+_UPX_ENV += --ultra-brute -9
+else
+_UPX_ENV += -1
+endif
+
 .PHONY: all
 all: fmt build
 
-.PHONY: release
-release: fmt release_wol_server
-
 .PHONY: build
-build: wol_server
+build: init fmt wol_server
+
+.PHONY: release
+release: init fmt release_wol_server
+
+.PHONY: release_build
+release_build:
+ifneq ($(BINNAME),)
+	@rm -rf release/$(BINNAME)
+ifneq ($(_UPX),)
+	@$(_UPX) $(_UPX_ENV) bin/$(BINNAME) -o release/$(BINNAME)
+else
+	@echo -e "\033[32;1m### \033[31;1mNo UPX be found, Uncompressed provided!\033[32;1m ###\033[0m"
+	@cp -raf bin/$(BINNAME) release/$(BINNAME)
+endif
+endif
+
+.PHONY: init
+init:
+	@mkdir -p bin release
 
 .PHONY: fmt
 fmt:
@@ -14,20 +47,18 @@ fmt:
 
 .PHONY: wol_server
 wol_server:
-	@go build -ldflags "-w -s" -o bin/wol_server
+	@go build -ldflags "-w -s" -o bin/$@
 
 .PHONY: release_wol_server
 release_wol_server: wol_server
-ifneq ($(UPX_PATH),)
-	$(UPX_PATH) -9 bin/wol_server
-endif
+	@BINNAME=$^ make -C . release_build
 
 .PHONY: clean
 clean:
-	@rm -rf bin
-	@go clean
+	@go clean -i -n -x -cache
+	@rm -rf bin go.sum
 
 .PHONY: distclean
 distclean:
-	@rm -rf bin
-	@go clean --modcache
+	@go clean -i -n -x --modcache
+	@rm -rf bin go.sum release
