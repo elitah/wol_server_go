@@ -1771,10 +1771,14 @@ func panicError(args ...interface{}) {
 	}
 }
 
-func init() {
+func initHttplib(rootCA, proxy string) {
+	var u *url.URL
+
 	var _t *tls.Config
 
-	rootCA := exeDir + "/rootCA.bin"
+	if "" == rootCA {
+		rootCA = exeDir + "/rootCA.bin"
+	}
 
 	if info, err := os.Stat(rootCA); nil == err {
 		if 0 < info.Size() {
@@ -1790,6 +1794,17 @@ func init() {
 		}
 	}
 
+	if "" != proxy {
+		if _u, err := url.Parse(proxy); nil == err {
+			switch _u.Scheme {
+			case "http", "https", "socks5":
+				if "" != _u.Host {
+					u = _u
+				}
+			}
+		}
+	}
+
 	// 设置httplib默认参数
 	httplib.SetDefaultSetting(httplib.BeegoHTTPSettings{
 		ShowDebug:        false,
@@ -1797,7 +1812,9 @@ func init() {
 		ConnectTimeout:   5 * time.Second,
 		ReadWriteTimeout: 15 * time.Second,
 		TLSClientConfig:  _t,
-		Proxy:            nil,
+		Proxy: func(req *http.Request) (*url.URL, error) {
+			return u, nil
+		},
 		Transport: &http.Transport{
 			MaxIdleConns:          64,
 			IdleConnTimeout:       90 * time.Second,
@@ -1820,10 +1837,18 @@ func main() {
 
 	var oauthList string
 
+	var ca string
+
+	var proxy string
+
 	flag.BoolVar(&help, "h", false, "This Help.")
 	flag.StringVar(&addrWol, "l", ":4000", "wol listen address.")
 	flag.StringVar(&addrHttp, "p", ":80", "http listen address.")
 	flag.StringVar(&oauthList, "o", "", "github OAuth node list.")
+
+	flag.StringVar(&ca, "ca", "", "CA filepath.")
+
+	flag.StringVar(&proxy, "proxy", "", "proxy url.")
 
 	flag.Parse()
 
@@ -1840,6 +1865,8 @@ func main() {
 		// for help
 	} else if "" != addrWol && "" != addrHttp {
 		var wg sync.WaitGroup
+
+		initHttplib(ca, proxy)
 
 		p, err := ants.NewPool(1000)
 
