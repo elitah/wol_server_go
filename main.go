@@ -52,6 +52,12 @@ var (
 	ErrEmptyWrite  = errors.New("empty write")
 )
 
+type OAuthConfig struct {
+	Domain string `json:"domain"`
+	Key    string `json:"key"`
+	Secret string `json:"secret"`
+}
+
 type OAuthStore struct {
 	Key    string
 	Secret string
@@ -1854,10 +1860,28 @@ func main() {
 		wol := NewWolServer(p, l_wol)
 
 		if "" != oauthList {
-			if list := strings.Split(oauthList, ";"); 0 < len(list) {
-				for _, item := range list {
-					if arr := strings.Split(item, ":"); 3 <= len(arr) {
-						wol.AddOAuth(arr[0], arr[1], arr[2])
+			switch {
+			default:
+				if info, err := os.Stat(oauthList); nil == err {
+					if 0 < info.Size() {
+						var list []OAuthConfig
+						//
+						if data, err := ioutil.ReadFile(oauthList); nil == err {
+							//
+							if err := json.Unmarshal(data, &list); nil == err {
+								for i, _ := range list {
+									wol.AddOAuth(list[i].Domain, list[i].Key, list[i].Secret)
+								}
+							}
+						}
+					}
+					break
+				}
+				if list := strings.Split(oauthList, ";"); 0 < len(list) {
+					for _, item := range list {
+						if arr := strings.Split(item, ":"); 3 <= len(arr) {
+							wol.AddOAuth(arr[0], arr[1], arr[2])
+						}
 					}
 				}
 			}
