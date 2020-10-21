@@ -563,6 +563,10 @@ type WolClient struct {
 
 	warnCnt uint64
 
+	firstWarn time.Time
+	prevWarn  time.Time
+	lastWarn  time.Time
+
 	nextWarn time.Time
 }
 
@@ -585,6 +589,59 @@ func (this *WolClient) Offline() {
 	this.Conn = nil
 }
 
+func (this *WolClient) WarnUpdate() {
+	now := time.Now()
+
+	this.Lock()
+	defer this.Unlock()
+
+	if this.firstWarn.IsZero() {
+		this.firstWarn = now
+	}
+
+	if this.prevWarn.IsZero() {
+		this.prevWarn = now
+	}
+
+	if this.lastWarn.IsZero() {
+		this.lastWarn = now
+	}
+
+	if 10*time.Second < now.Sub(this.lastWarn) {
+		this.firstWarn = now
+		this.prevWarn = now
+	} else {
+		this.prevWarn = this.lastWarn
+	}
+	//
+	this.lastWarn = now
+}
+
+func (this *WolClient) GetWarnDuration() (time.Duration, bool) {
+	now := time.Now()
+
+	this.Lock()
+	defer this.Unlock()
+
+	if this.firstWarn.IsZero() {
+		return 0, false
+	}
+
+	if this.prevWarn.IsZero() {
+		return 0, false
+	}
+
+	if this.lastWarn.IsZero() {
+		return 0, false
+	}
+
+	if d := now.Sub(this.lastWarn); 10*time.Second < d {
+		return this.lastWarn.Sub(this.firstWarn), false
+	}
+
+	return now.Sub(this.firstWarn), true
+}
+
 func (this *WolClient) Warn() string {
 	nowtime := time.Now()
 
@@ -605,9 +662,13 @@ func (this *WolClient) GetWarnCount() uint64 {
 	return atomic.AddUint64(&this.warnCnt, 1)
 }
 
-func (this *WolClient) HadAdmin() bool {
+func (this *WolClient) HadAdmin(args ...string) bool {
 	this.RLock()
 	defer this.RUnlock()
+
+	if 0 < len(args) && "" != args[0] {
+		return args[0] == this.Admin
+	}
 
 	return "" != this.Admin
 }
@@ -886,7 +947,7 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 						case "client_list":
 							// 返回true
 							response.Status = true
-							response.Response = this.listAll()
+							response.Response = this.listAll("")
 						case "wol", "shutdown":
 							key := j.GetPath("key").MustString()
 							mac := j.GetPath("mac").MustString()
@@ -910,6 +971,9 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 						case "warn":
 							if "" != devid {
 								if c := this.listGet(devid); nil != c {
+									//
+									c.WarnUpdate()
+									//
 									if c.HadAdmin() {
 										if admin := c.Warn(); "" != admin {
 											if data, err := ioutil.ReadFile(exeDir + "/db/user_" + admin + ".json"); nil == err {
@@ -919,29 +983,36 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 														if j.Warns[i].DeviceID == devid {
 															if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 																if err := this.mPool.Submit(func() {
-																	if result, err := httplib.Get("https://sc.ftqq.com/"+j.Warns[i].Key+".send").
-																		Param("text", fmt.Sprintf("%s (No.%d)", j.Warns[i].Title, c.GetWarnCount())). // 通知标题
-																		Param("desp", j.Warns[i].Desp).                                               // 通知内容
-																		String(); nil == err {
-																		//{"errno":0,"errmsg":"success","dataset":"done"}
-																		//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
-																		_r := struct {
-																			ErrNo   int    `json:"errno"`
-																			ErrMsg  string `json:"errmsg"`
-																			DataSet string `json:"dataset"`
-																		}{}
-																		if err := json.Unmarshal([]byte(result), &_r); nil == err {
+																	//
+																	//{"errno":0,"errmsg":"success","dataset":"done"}
+																	//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
+																	_r := struct {
+																		ErrNo   int    `json:"errno"`
+																		ErrMsg  string `json:"errmsg"`
+																		DataSet string `json:"dataset"`
+																	}{}
+																	//
+																	for i := 0; 5 > i; i++ {
+																		if err := httplib.Post("https://sc.ftqq.com/"+j.Warns[i].Key+".send").
+																			Param("text", fmt.Sprintf("%s (No.%d)", j.Warns[i].Title, c.GetWarnCount())).             // 通知标题
+																			Param("desp", fmt.Sprintf("%s\r\n\r\n\r\n\r\n[查看设备详情](http://r263s66464.wicp.vip/device?devid=%s)\r\n\r\nhttp://r263s66464.wicp.vip/device?devid=%s", j.Warns[i].Desp, devid, devid)). // 通知内容
+																			ToJSON(&_r); nil == err {
+																			//
 																			if 0 == _r.ErrNo {
+																				//
 																				this.waitListResult(devid, true)
+																				//
 																				return
 																			}
+																			//
 																			this.showConnInfo(devid, _r.ErrMsg)
+																			//
+																			time.Sleep(1 * time.Second)
 																		} else {
 																			this.showConnInfo(devid, err)
 																		}
-																	} else {
-																		this.showConnInfo(devid, err)
 																	}
+																	//
 																	this.waitListResult(devid, false)
 																}); nil == err {
 																	nothing_to_send = true
@@ -1112,6 +1183,7 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					UserID     string
 					NodeID     string
 					AvatarUrl  string
+					DeviceList interface{}
 					WarnList   []WarnStore
 					ServerList []string
 				}{
@@ -1119,6 +1191,7 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 					UserID:     u.Get("userid"),
 					NodeID:     u.Get("nodeid"),
 					AvatarUrl:  u.Get("avatar_url"),
+					DeviceList: this.listAll(u.Get("nodeid")),
 					WarnList:   ui.Warns,
 					ServerList: wol.Servers,
 				}); nil == err {
@@ -1139,6 +1212,67 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	case "/favicon.ico":
 		http.NotFound(w, r)
+		return
+	case "/device":
+		if devid := r.FormValue("devid"); "" != devid {
+			if u := this.GetUserInfo(r); nil != u {
+				if c := this.listGet(devid); nil != c {
+					if nodeid := u.Get("nodeid"); "" != nodeid {
+						if c.HadAdmin(nodeid) {
+							if d, warning := c.GetWarnDuration(); warning {
+								HTMLBody(w, fmt.Sprintf(`<ul>
+	<li>报警次数：%d</li>
+	<br />
+	<li>当前状态：<b style="color: red;">触发中</b></li>
+	<br />
+	<li>本次报警起始时间：%s</li>
+	<li>本次报警前次时间：%s</li>
+	<li>本次报警本次时间：%s</li>
+	<li>本次报警累积时长：%v</li>
+	<br />
+	<li><a href="/">返回</a></li>
+</ul>`,
+									c.warnCnt,
+									c.firstWarn.Format("2006-01-02 15:04:05"),
+									c.prevWarn.Format("2006-01-02 15:04:05"),
+									c.lastWarn.Format("2006-01-02 15:04:05"),
+									d,
+								))
+							} else {
+								HTMLBody(w, fmt.Sprintf(`<ul>
+	<li>报警次数：%d</li>
+	<br />
+	<li>当前状态：<b style="color: green;">安全</b></li>
+	<br />
+	<li>上次报警起始时间：%s</li>
+	<li>上次报警前次时间：%s</li>
+	<li>上次报警本次时间：%s</li>
+	<li>上次报警累积时长：%v</li>
+	<br />
+	<li><a href="/">返回</a></li>
+</ul>`,
+									c.warnCnt,
+									c.firstWarn.Format("2006-01-02 15:04:05"),
+									c.prevWarn.Format("2006-01-02 15:04:05"),
+									c.lastWarn.Format("2006-01-02 15:04:05"),
+									d,
+								))
+							}
+							return
+						}
+						//
+						HTMLBody(w, "<h3>无权访问此设备，请<a href=\"/\">返回首页</a></h3>")
+						//
+						return
+					}
+				}
+			}
+			w.Header().Set("Location", "/login")
+			w.WriteHeader(http.StatusFound)
+		} else {
+			w.Header().Set("Location", "/")
+			w.WriteHeader(http.StatusFound)
+		}
 		return
 	case "/wol_add", "/wol_del":
 		address := r.URL.Query().Get("address")
@@ -1678,7 +1812,7 @@ func (this *WolServer) listDel(key string) {
 	}
 }
 
-func (this *WolServer) listAll() interface{} {
+func (this *WolServer) listAll(admin string) interface{} {
 	type _clientInfo struct {
 		Key      string `json:"key"`
 		Online   bool   `json:"online"`
@@ -1705,6 +1839,12 @@ func (this *WolServer) listAll() interface{} {
 		for key, value := range this.mList {
 			value.RLock()
 
+			if "" != admin && admin != value.Admin {
+				value.RUnlock()
+
+				continue
+			}
+
 			result.List[i].Key = key
 
 			result.List[i].Online = nil != value.Conn
@@ -1720,6 +1860,8 @@ func (this *WolServer) listAll() interface{} {
 			i++
 		}
 	}
+
+	result.Count = len(result.List)
 
 	return result
 }
