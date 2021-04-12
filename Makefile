@@ -47,7 +47,7 @@ fmt:
 
 .PHONY: wol_server
 wol_server:
-	@go build -ldflags "-w -s" -o bin/$@
+	@go build -ldflags "-w -s" -o bin/$@ cmd/wol_server/main.go
 
 .PHONY: release_wol_server
 release_wol_server: wol_server
