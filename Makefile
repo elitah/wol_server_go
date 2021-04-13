@@ -47,10 +47,18 @@ fmt:
 
 .PHONY: wol_server
 wol_server:
-	@go build -ldflags "-w -s" -o bin/$@ cmd/wol_server/main.go
+	@go build -ldflags "-w -s" -o bin/$@ cmd/$@/main.go
+
+.PHONY: wol_test
+wol_test:
+	@go build -ldflags "-w -s" -o bin/$@ cmd/$@/main.go
 
 .PHONY: release_wol_server
 release_wol_server: wol_server
+	@BINNAME=$^ make -C . release_build
+
+.PHONY: release_wol_test
+release_wol_test: wol_test
 	@BINNAME=$^ make -C . release_build
 
 .PHONY: clean
