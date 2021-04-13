@@ -82,6 +82,7 @@ type WolStore struct {
 type WarnStore struct {
 	DeviceID string `json:"devid"`
 	Key      string `json:"key"`
+	Location string `json:"location"`
 	Title    string `json:"title"`
 	Desp     string `json:"desp"`
 }
@@ -984,6 +985,8 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 															if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 																if err := this.mPool.Submit(func() {
 																	//
+																	var title, desp string
+																	//
 																	//{"errno":0,"errmsg":"success","dataset":"done"}
 																	//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
 																	_r := struct {
@@ -992,10 +995,36 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 																		DataSet string `json:"dataset"`
 																	}{}
 																	//
+																	if d, _ := c.GetWarnDuration(); true {
+																		//
+																		title = j.Warns[i].Title
+																		//
+																		desp = fmt.Sprintf(`设备ID：%s
+位置：%s
+时间：%s
+报警次数：第%d次
+已累计时长：%v
+其他信息：
+%s
+`,
+																			devid,
+																			j.Warns[i].Location,
+																			time.Now().Format("2006-01-02 15:04:05"),
+																			c.GetWarnCount(),
+																			func() string {
+																				if 10*time.Second > d {
+																					return "小于10秒"
+																				}
+																				return fmt.Sprintf("%.0f秒", d.Seconds())
+																			}(),
+																			j.Warns[i].Desp,
+																		)
+																	}
+																	//
 																	for i := 0; 5 > i; i++ {
-																		if err := httplib.Post("https://sc.ftqq.com/"+j.Warns[i].Key+".send").
-																			Param("text", fmt.Sprintf("%s (No.%d)", j.Warns[i].Title, c.GetWarnCount())).             // 通知标题
-																			Param("desp", fmt.Sprintf("%s\r\n\r\n\r\n\r\n[查看设备详情](http://r263s66464.wicp.vip/device?devid=%s)\r\n\r\nhttp://r263s66464.wicp.vip/device?devid=%s", j.Warns[i].Desp, devid, devid)). // 通知内容
+																		if err := httplib.Post("https://sctapi.ftqq.com/"+j.Warns[i].Key+".send").
+																			Param("text", title). // 通知标题
+																			Param("desp", desp).  // 通知内容
 																			ToJSON(&_r); nil == err {
 																			//
 																			if 0 == _r.ErrNo {
