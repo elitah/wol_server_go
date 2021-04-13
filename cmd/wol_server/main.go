@@ -650,7 +650,7 @@ func (this *WolClient) Warn() string {
 
 	if "" != this.Admin {
 		if this.nextWarn.IsZero() || nowtime.After(this.nextWarn) {
-			this.nextWarn = nowtime.Add(3 * time.Minute)
+			this.nextWarn = nowtime.Add(1 * time.Minute)
 			return this.Admin
 		}
 	}
