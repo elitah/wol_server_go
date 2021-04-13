@@ -1860,8 +1860,6 @@ func (this *WolServer) listAll(admin string) interface{} {
 	if 0 < result.Count {
 		var i int
 
-		result.List = make([]_clientInfo, result.Count)
-
 		this.RLock()
 		defer this.RUnlock()
 
@@ -1874,15 +1872,18 @@ func (this *WolServer) listAll(admin string) interface{} {
 				continue
 			}
 
-			result.List[i].Key = key
-
-			result.List[i].Online = nil != value.Conn
-
-			if result.List[i].Online {
-				result.List[i].SSID = value.SSID
-				result.List[i].LanIP = value.LanIP
-				result.List[i].GlobalIP = value.Conn.RemoteAddr().String()
+			cinfo := _clientInfo{
+				Key: key,
+				Online: nil != value.Conn,
 			}
+
+			if cinfo.Online {
+				cinfo.SSID = value.SSID
+				cinfo.LanIP = value.LanIP
+				cinfo.GlobalIP = value.Conn.RemoteAddr().String()
+			}
+
+			result.List = append(result.List, cinfo)
 
 			value.RUnlock()
 
