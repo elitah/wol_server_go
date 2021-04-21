@@ -42,6 +42,8 @@ import (
 var (
 	exeDir = exepath.GetExeDir()
 
+	qywx = &QYWeiXinAPI{}
+
 	ErrClosed      = errors.New("client offline")
 	ErrInvalidJson = errors.New("invalid json struct")
 	ErrMacAddress  = errors.New("invalid mac address")
@@ -51,6 +53,151 @@ var (
 	ErrEmptyRead   = errors.New("empty read")
 	ErrEmptyWrite  = errors.New("empty write")
 )
+
+type QYWeiXinAPI struct {
+	//
+	CorpID string
+	//
+	AppID     int64
+	AppSecret string
+	//
+	flag uint32
+	//
+	accessToken string
+}
+
+func (this *QYWeiXinAPI) Init() {
+	//
+	if "" != this.CorpID && 0 < this.AppID && "" != this.AppSecret {
+		//
+		if atomic.CompareAndSwapUint32(&this.flag, 0x0, 0x1) {
+			//
+			go func() {
+				//
+				var failcnt int
+				//
+				result := struct {
+					ErrCode     int    `json:"errcode"`
+					ErrMsg      string `json:"errmsg"`
+					AccessToken string `json:"access_token"`
+					ExpiresIn   int64  `json:"expires_in"`
+				}{}
+				//
+				defer atomic.StoreUint32(&this.flag, 0x0)
+				//
+				for {
+					//
+					if err := httplib.Get(fmt.Sprintf(
+						"https://qyapi.weixin.qq.com/cgi-bin/gettoken?corpid=%s&corpsecret=%s",
+						this.CorpID, this.AppSecret,
+					)).ToJSON(&result); nil == err {
+						//
+						if 0 == result.ErrCode && "ok" == result.ErrMsg {
+							//
+							if "" != result.AccessToken {
+								//
+								failcnt = 0
+								//
+								this.accessToken = result.AccessToken
+								//
+								//this.SendText("测试\n测试\n测试\n测试\n测试")
+								//
+								if 181 > result.ExpiresIn {
+									//
+									result.ExpiresIn = 181
+								}
+								//
+								time.Sleep(time.Duration(result.ExpiresIn-180) * time.Second)
+								//
+								continue
+							}
+						}
+					}
+					//
+					if 5 > failcnt {
+						//
+						time.Sleep(3 * time.Second)
+						//
+						failcnt++
+					} else {
+						//
+						time.Sleep(60 * time.Second)
+					}
+				}
+			}()
+		}
+	}
+}
+
+func (this *QYWeiXinAPI) SendText(content string) bool {
+	//
+	if 0x0 == atomic.LoadUint32(&this.flag) {
+		//
+		return false
+	}
+	//
+	for {
+		//
+		if "" != this.accessToken {
+			//
+			if req, err := httplib.Post(fmt.Sprintf(
+				"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s",
+				this.accessToken,
+			)).JSONBody(struct {
+				ToUser                 string      `json:"touser"`
+				ToParty                string      `json:"toparty"`
+				ToTag                  string      `json:"totag"`
+				MsgType                string      `json:"msgtype"`
+				AgentID                int64       `json:"agentid"`
+				Text                   interface{} `json:"text"`
+				Safe                   int64       `json:"safe"`
+				EnableIDTrans          int64       `json:"enable_id_trans"`
+				EnableDuplicateCheck   int64       `json:"enable_duplicate_check"`
+				DuplicateCheckInterval int64       `json:"duplicate_check_interval"`
+			}{
+				ToUser:  "@all",
+				ToParty: "@all",
+				ToTag:   "@all",
+				MsgType: "text",
+				AgentID: this.AppID,
+				Text: struct {
+					Content string `json:"content"`
+				}{
+					Content: content,
+				},
+				DuplicateCheckInterval: 1800,
+			}); nil == err {
+				//
+				result := struct {
+					ErrCode     int    `json:"errcode"`
+					ErrMsg      string `json:"errmsg"`
+					InvalidUser string `json:"invaliduser"`
+				}{}
+				//
+				if err := req.ToJSON(&result); nil == err {
+					//
+					if 0 == result.ErrCode && "ok" == result.ErrMsg {
+						//
+						return true
+					} else {
+						//
+						logs.Warn(result.ErrCode)
+					}
+				} else {
+					//
+					logs.Warn(err)
+				}
+				//
+				return false
+			} else {
+				//
+				logs.Warn(err)
+			}
+		}
+		//
+		time.Sleep(3 * time.Second)
+	}
+}
 
 type OAuthConfig struct {
 	Domain string `json:"domain"`
@@ -989,11 +1136,11 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 																	//
 																	//{"errno":0,"errmsg":"success","dataset":"done"}
 																	//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
-																	_r := struct {
-																		ErrNo   int    `json:"errno"`
-																		ErrMsg  string `json:"errmsg"`
-																		DataSet string `json:"dataset"`
-																	}{}
+																	//_r := struct {
+																	//	ErrNo   int    `json:"errno"`
+																	//	ErrMsg  string `json:"errmsg"`
+																	//	DataSet string `json:"dataset"`
+																	//}{}
 																	//
 																	if d, _ := c.GetWarnDuration(); true {
 																		//
@@ -1021,26 +1168,33 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 																		)
 																	}
 																	//
-																	for i := 0; 5 > i; i++ {
-																		if err := httplib.Post("https://sctapi.ftqq.com/"+j.Warns[i].Key+".send").
-																			Param("text", title). // 通知标题
-																			Param("desp", desp).  // 通知内容
-																			ToJSON(&_r); nil == err {
-																			//
-																			if 0 == _r.ErrNo {
-																				//
-																				this.waitListResult(devid, true)
-																				//
-																				return
-																			}
-																			//
-																			this.showConnInfo(devid, _r.ErrMsg)
-																			//
-																			time.Sleep(1 * time.Second)
-																		} else {
-																			this.showConnInfo(devid, err)
-																		}
+																	if qywx.SendText(title + "\n" + desp) {
+																		//
+																		this.waitListResult(devid, true)
 																	}
+																	/*
+																		//
+																		for i := 0; 5 > i; i++ {
+																			if err := httplib.Post("https://sctapi.ftqq.com/"+j.Warns[i].Key+".send").
+																				Param("text", title). // 通知标题
+																				Param("desp", desp).  // 通知内容
+																				ToJSON(&_r); nil == err {
+																				//
+																				if 0 == _r.ErrNo {
+																					//
+																					this.waitListResult(devid, true)
+																					//
+																					return
+																				}
+																				//
+																				this.showConnInfo(devid, _r.ErrMsg)
+																				//
+																				time.Sleep(1 * time.Second)
+																			} else {
+																				this.showConnInfo(devid, err)
+																			}
+																		}
+																	*/
 																	//
 																	this.waitListResult(devid, false)
 																}); nil == err {
@@ -1873,7 +2027,7 @@ func (this *WolServer) listAll(admin string) interface{} {
 			}
 
 			cinfo := _clientInfo{
-				Key: key,
+				Key:    key,
 				Online: nil != value.Conn,
 			}
 
@@ -2009,6 +2163,12 @@ func main() {
 
 	var oauthList string
 
+	var corpID string
+
+	var appID int64
+
+	var appSecret string
+
 	var ca string
 
 	var proxy string
@@ -2017,6 +2177,10 @@ func main() {
 	flag.StringVar(&addrWol, "l", ":4000", "wol listen address.")
 	flag.StringVar(&addrHttp, "p", ":80", "http listen address.")
 	flag.StringVar(&oauthList, "o", "", "github OAuth node list.")
+
+	flag.StringVar(&corpID, "cid", "", "（企业微信）企业ID.")
+	flag.Int64Var(&appID, "aid", 0, "（企业微信）应用ID.")
+	flag.StringVar(&appSecret, "key", "", "（企业微信）应用密钥.")
 
 	flag.StringVar(&ca, "ca", "", "CA filepath.")
 
@@ -2045,6 +2209,15 @@ func main() {
 		panicError("无法创建协程池", err)
 
 		defer p.Release()
+
+		if "" != corpID && 0 < appID && "" != appSecret {
+			//
+			qywx.CorpID = corpID
+			qywx.AppID = appID
+			qywx.AppSecret = appSecret
+			//
+			qywx.Init()
+		}
 
 		// 创建wol监听
 		l_wol, err := net.Listen("tcp", addrWol)
