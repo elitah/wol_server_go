@@ -711,11 +711,13 @@ type WolClient struct {
 
 	warnCnt uint64
 
-	firstWarn time.Time
-	prevWarn  time.Time
-	lastWarn  time.Time
+	warnFlag uint32
 
-	nextWarn time.Time
+	warnTicker *time.Timer
+
+	warnStart time.Time
+
+	warnDuration time.Duration
 }
 
 func (this *WolClient) Update(conn net.Conn, ssid, ip string) {
@@ -728,6 +730,12 @@ func (this *WolClient) Update(conn net.Conn, ssid, ip string) {
 
 	this.SSID = ssid
 	this.LanIP = ip
+
+	//
+	if this.warnStart.IsZero() {
+		//
+		this.warnStart = time.Time{}
+	}
 }
 
 func (this *WolClient) Offline() {
@@ -737,77 +745,138 @@ func (this *WolClient) Offline() {
 	this.Conn = nil
 }
 
-func (this *WolClient) WarnUpdate() {
-	now := time.Now()
-
-	this.Lock()
-	defer this.Unlock()
-
-	if this.firstWarn.IsZero() {
-		this.firstWarn = now
-	}
-
-	if this.prevWarn.IsZero() {
-		this.prevWarn = now
-	}
-
-	if this.lastWarn.IsZero() {
-		this.lastWarn = now
-	}
-
-	if 10*time.Second < now.Sub(this.lastWarn) {
-		this.firstWarn = now
-		this.prevWarn = now
+func (this *WolClient) WarnStart(devid string) bool {
+	//
+	if atomic.CompareAndSwapUint32(&this.warnFlag, 0x0, 0x1) {
+		//
+		atomic.AddUint64(&this.warnCnt, 1)
+		//
+		exit := make(chan struct{})
+		//
+		this.warnStart = time.Now()
+		//
+		this.warnDuration = 0
+		//
+		if "" != this.Admin {
+			//
+			if data, err := ioutil.ReadFile(exeDir + "/db/user_" + this.Admin + ".json"); nil == err {
+				//
+				j := UserStore{}
+				//
+				if err := json.Unmarshal(data, &j); nil == err {
+					//
+					for i, _ := range j.Warns {
+						//
+						if j.Warns[i].DeviceID == devid {
+							//
+							if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
+								//
+								go func(devid, location, title, desp string, cnt uint64) {
+									//
+									_desp := fmt.Sprintf(`设备ID：%s
+位置：%s
+时间：%s
+报警次数：第%d次
+已累计时长：%.1f 秒
+其他信息：
+%s
+`,
+										devid,
+										location,
+										time.Now().Format("2006-01-02 15:04:05"),
+										cnt,
+										this.warnDuration.Seconds(),
+										desp,
+									)
+									//
+									qywx.SendText(title + "\n\n" + _desp)
+									//
+									ticker := time.NewTimer(3 * time.Minute)
+									//
+									for {
+										//
+										select {
+										case <-exit:
+											//
+											ticker.Stop()
+											//
+											_desp = fmt.Sprintf(`设备ID：%s
+位置：%s
+时间：%s
+报警次数：第%d次
+已累计时长：%.1f 秒
+其他信息：
+%s
+`,
+												devid,
+												location,
+												time.Now().Format("2006-01-02 15:04:05"),
+												cnt,
+												this.warnDuration.Seconds(),
+												desp,
+											)
+											//
+											qywx.SendText("报警信号已终止\n\n" + _desp)
+											//
+											return
+										case <-ticker.C:
+											//
+											ticker.Reset(3 * time.Minute)
+											//
+											_desp := fmt.Sprintf(`设备ID：%s
+位置：%s
+时间：%s
+报警次数：第%d次
+已累计时长：%.1f 秒
+其他信息：
+%s
+`,
+												devid,
+												location,
+												time.Now().Format("2006-01-02 15:04:05"),
+												cnt,
+												this.warnDuration.Seconds(),
+												desp,
+											)
+											//
+											qywx.SendText(title + "(中段提醒)\n\n" + _desp)
+										}
+									}
+								}(devid, j.Warns[i].Location, j.Warns[i].Title, j.Warns[i].Desp, this.warnCnt)
+							}
+						}
+					}
+				}
+			}
+		}
+		//
+		go func(exit chan struct{}) {
+			//
+			this.warnTicker = time.NewTimer(5 * time.Second)
+			//
+			<-this.warnTicker.C
+			//
+			this.warnTicker.Stop()
+			//
+			this.warnDuration = time.Since(this.warnStart)
+			//
+			close(exit)
+			//
+			atomic.StoreUint32(&this.warnFlag, 0x0)
+		}(exit)
 	} else {
-		this.prevWarn = this.lastWarn
+		//
+		this.warnDuration = time.Since(this.warnStart)
+		//
+		this.warnTicker.Reset(5 * time.Second)
 	}
 	//
-	this.lastWarn = now
+	return true
 }
 
 func (this *WolClient) GetWarnDuration() (time.Duration, bool) {
-	now := time.Now()
-
-	this.Lock()
-	defer this.Unlock()
-
-	if this.firstWarn.IsZero() {
-		return 0, false
-	}
-
-	if this.prevWarn.IsZero() {
-		return 0, false
-	}
-
-	if this.lastWarn.IsZero() {
-		return 0, false
-	}
-
-	if d := now.Sub(this.lastWarn); 10*time.Second < d {
-		return this.lastWarn.Sub(this.firstWarn), false
-	}
-
-	return now.Sub(this.firstWarn), true
-}
-
-func (this *WolClient) Warn() string {
-	nowtime := time.Now()
-
-	this.Lock()
-	defer this.Unlock()
-
-	if "" != this.Admin {
-		if this.nextWarn.IsZero() || nowtime.After(this.nextWarn) {
-			this.nextWarn = nowtime.Add(1 * time.Minute)
-			return this.Admin
-		}
-	}
-
-	return ""
-}
-
-func (this *WolClient) GetWarnCount() uint64 {
-	return atomic.AddUint64(&this.warnCnt, 1)
+	//
+	return this.warnDuration, 0x0 != atomic.LoadUint32(&this.warnFlag)
 }
 
 func (this *WolClient) HadAdmin(args ...string) bool {
@@ -1118,112 +1187,10 @@ func (this *WolServer) HandlerConn(conn net.Conn) {
 							}
 						case "warn":
 							if "" != devid {
+								//
 								if c := this.listGet(devid); nil != c {
 									//
-									c.WarnUpdate()
-									//
-									if c.HadAdmin() {
-										if admin := c.Warn(); "" != admin {
-											if data, err := ioutil.ReadFile(exeDir + "/db/user_" + admin + ".json"); nil == err {
-												j := UserStore{}
-												if err := json.Unmarshal(data, &j); nil == err {
-													for i, _ := range j.Warns {
-														if j.Warns[i].DeviceID == devid {
-															if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
-																if err := this.mPool.Submit(func() {
-																	//
-																	var title, desp string
-																	//
-																	//{"errno":0,"errmsg":"success","dataset":"done"}
-																	//{"errno":1024,"errmsg":"\u4e0d\u8981\u91cd\u590d\u53d1\u9001\u540c\u6837\u7684\u5185\u5bb9"}
-																	//_r := struct {
-																	//	ErrNo   int    `json:"errno"`
-																	//	ErrMsg  string `json:"errmsg"`
-																	//	DataSet string `json:"dataset"`
-																	//}{}
-																	//
-																	if d, _ := c.GetWarnDuration(); true {
-																		//
-																		title = j.Warns[i].Title
-																		//
-																		desp = fmt.Sprintf(`设备ID：%s
-位置：%s
-时间：%s
-报警次数：第%d次
-已累计时长：%v
-其他信息：
-%s
-`,
-																			devid,
-																			j.Warns[i].Location,
-																			time.Now().Format("2006-01-02 15:04:05"),
-																			c.GetWarnCount(),
-																			func() string {
-																				if 10*time.Second > d {
-																					return "小于10秒"
-																				}
-																				return fmt.Sprintf("%.0f秒", d.Seconds())
-																			}(),
-																			j.Warns[i].Desp,
-																		)
-																	}
-																	//
-																	if qywx.SendText(title + "\n" + desp) {
-																		//
-																		this.waitListResult(devid, true)
-																	}
-																	/*
-																		//
-																		for i := 0; 5 > i; i++ {
-																			if err := httplib.Post("https://sctapi.ftqq.com/"+j.Warns[i].Key+".send").
-																				Param("text", title). // 通知标题
-																				Param("desp", desp).  // 通知内容
-																				ToJSON(&_r); nil == err {
-																				//
-																				if 0 == _r.ErrNo {
-																					//
-																					this.waitListResult(devid, true)
-																					//
-																					return
-																				}
-																				//
-																				this.showConnInfo(devid, _r.ErrMsg)
-																				//
-																				time.Sleep(1 * time.Second)
-																			} else {
-																				this.showConnInfo(devid, err)
-																			}
-																		}
-																	*/
-																	//
-																	this.waitListResult(devid, false)
-																}); nil == err {
-																	nothing_to_send = true
-
-																	this.waitListAdd(devid, conn)
-
-																	this.showConnInfo(devid, "send warn ok")
-																} else {
-																	this.showConnInfo(devid, err)
-																}
-															} else {
-																this.showConnInfo(devid, "invalid warn key, title, desc")
-															}
-															break
-														}
-													}
-												} else {
-													this.showConnInfo(devid, err)
-												}
-											} else {
-												this.showConnInfo(devid, err)
-											}
-										} else {
-											this.showConnInfo(devid, ErrWarnLocked)
-										}
-									} else {
-										this.showConnInfo(devid, ErrNoAdmin)
-									}
+									this.waitListResult(devid, c.WarnStart(devid))
 								} else {
 									this.showConnInfo(devid, ErrNoClient)
 								}
@@ -1409,17 +1376,13 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	<li>当前状态：<b style="color: red;">触发中</b></li>
 	<br />
 	<li>本次报警起始时间：%s</li>
-	<li>本次报警前次时间：%s</li>
-	<li>本次报警本次时间：%s</li>
-	<li>本次报警累积时长：%v</li>
+	<li>本次报警累积时长：%.1f 秒</li>
 	<br />
 	<li><a href="/">返回</a></li>
 </ul>`,
 									c.warnCnt,
-									c.firstWarn.Format("2006-01-02 15:04:05"),
-									c.prevWarn.Format("2006-01-02 15:04:05"),
-									c.lastWarn.Format("2006-01-02 15:04:05"),
-									d,
+									c.warnStart.Format("2006-01-02 15:04:05"),
+									d.Seconds(),
 								))
 							} else {
 								HTMLBody(w, fmt.Sprintf(`<ul>
@@ -1428,17 +1391,13 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	<li>当前状态：<b style="color: green;">安全</b></li>
 	<br />
 	<li>上次报警起始时间：%s</li>
-	<li>上次报警前次时间：%s</li>
-	<li>上次报警本次时间：%s</li>
-	<li>上次报警累积时长：%v</li>
+	<li>上次报警累积时长：%.1f 秒</li>
 	<br />
 	<li><a href="/">返回</a></li>
 </ul>`,
 									c.warnCnt,
-									c.firstWarn.Format("2006-01-02 15:04:05"),
-									c.prevWarn.Format("2006-01-02 15:04:05"),
-									c.lastWarn.Format("2006-01-02 15:04:05"),
-									d,
+									c.warnStart.Format("2006-01-02 15:04:05"),
+									d.Seconds(),
 								))
 							}
 							return
