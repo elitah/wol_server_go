@@ -42,6 +42,8 @@ import (
 var (
 	exeDir = exepath.GetExeDir()
 
+	recordURL = ""
+
 	qywx = &QYWeiXinAPI{}
 
 	ErrClosed      = errors.New("client offline")
@@ -277,6 +279,10 @@ type WarnStore struct {
 	Location string `json:"location"`
 	Title    string `json:"title"`
 	Desp     string `json:"desp"`
+	Record   struct {
+		Start    string `json:"start"`
+		Duration int    `json:"duration"`
+	} `json:"record"`
 }
 
 func AESEncrypt(b cipher.Block, text string) (string, bool) {
@@ -754,6 +760,8 @@ type WolClient struct {
 
 	Admin string
 
+	recordFlag int32
+
 	warnCnt uint32
 
 	warnFlag uint32
@@ -790,11 +798,38 @@ func (this *WolClient) Offline() {
 	this.Conn = nil
 }
 
+func (this *WolClient) WarnRecordURL() string {
+	//
+	if 0x0 != atomic.LoadUint32(&this.warnFlag) ||
+		0x0 <= atomic.AddInt32(&this.recordFlag, -1) {
+		//
+		return fmt.Sprintf(
+			"https://qyapi.weixin.qq.com/cgi-bin/media/upload?access_token=%s&type=video",
+			qywx.GetAccessToken(),
+		)
+	}
+	//
+	return ""
+}
+
+func (this *WolClient) WarnRecordSend(devid, media_id string, timestamp int64) bool {
+	//
+	//qywx.SendText(media_id)
+	//
+	return qywx.SendVideo(
+		media_id,
+		fmt.Sprintf("报警视频(%s)", devid),
+		fmt.Sprintf("报警时间: %s", time.Unix(timestamp, 0).Format("2006-01-02 15:04:05")),
+	)
+}
+
 func (this *WolClient) WarnStart(devid string) bool {
 	//
 	if atomic.CompareAndSwapUint32(&this.warnFlag, 0x0, 0x1) {
 		//
 		atomic.AddUint32(&this.warnCnt, 1)
+		//
+		atomic.StoreInt32(&this.recordFlag, 0x2)
 		//
 		exit := make(chan struct{})
 		//
@@ -816,7 +851,7 @@ func (this *WolClient) WarnStart(devid string) bool {
 							//
 							if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 								//
-								go func(devid, location, title, desp, cnt uint32) {
+								go func(devid, location, title, desp, warn_record string, warn_duration int, cnt uint32) {
 									//
 									_desp := fmt.Sprintf(`设备ID：%s
 位置：%s
@@ -835,6 +870,39 @@ func (this *WolClient) WarnStart(devid string) bool {
 									)
 									//
 									qywx.SendText(title + "\n\n" + _desp)
+									//
+									if "" != warn_record {
+										//
+										if u, err := url.Parse(recordURL); nil == err {
+											//
+											if "" != u.Scheme && "" != u.Host {
+												//
+												u.Path = "/warn"
+												//
+												if resp, err := httplib.Get(warn_record).Param(
+													"url", u.String(),
+												).Param(
+													"devid", devid,
+												).Param(
+													"duration", fmt.Sprint(warn_duration),
+												).Response(); nil == err {
+													//
+													resp.Body.Close()
+													//
+													logs.Info("Get %s: %d", resp.Request.URL.String(), resp.StatusCode)
+												} else {
+													//
+													logs.Warn(err)
+												}
+											} else {
+												//
+												logs.Info("no scheme or host", u.String())
+											}
+										} else {
+											//
+											logs.Warn(err)
+										}
+									}
 									//
 									ticker := time.NewTimer(3 * time.Minute)
 									//
@@ -887,7 +955,14 @@ func (this *WolClient) WarnStart(devid string) bool {
 											qywx.SendText(title + "(中段提醒)\n\n" + _desp)
 										}
 									}
-								}(devid, j.Warns[i].Location, j.Warns[i].Title, j.Warns[i].Desp, this.warnCnt)
+								}(
+									devid, j.Warns[i].Location,
+									j.Warns[i].Title,
+									j.Warns[i].Desp,
+									j.Warns[i].Record.Start,
+									j.Warns[i].Record.Duration,
+									this.warnCnt,
+								)
 							}
 						}
 					}
@@ -1922,6 +1997,63 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 		}
+	case "/warn":
+		//
+		if devid := r.FormValue("devid"); "" != devid {
+			//
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			//
+			if method := r.FormValue("method"); "" != method {
+				//
+				if client := this.listGet(devid); nil != client {
+					//
+					switch method {
+					case "request":
+						//
+						fmt.Fprintf(w, `{"url":"%s"}`, client.WarnRecordURL())
+					case "send":
+						//
+						if media_id := r.FormValue("media_id"); "" != media_id {
+							//
+							timestamp := time.Now().Unix()
+							//
+							if t := r.FormValue("t"); "" != t {
+								//
+								if v, err := strconv.ParseInt(t, 10, 64); nil == err {
+									//
+									timestamp = v
+								}
+							}
+							//
+							if client.WarnRecordSend(devid, media_id, timestamp) {
+								//
+								fmt.Fprint(w, `{"errcode":0,"errmsg":"success"}`)
+							} else {
+								//
+								fmt.Fprint(w, `{"errcode":-1,"errmsg":"send failed"}`)
+							}
+						} else {
+							//
+							fmt.Fprint(w, `{"errcode":-2,"errmsg":"no media id"}`)
+						}
+					default:
+						//
+						fmt.Fprint(w, `{"errcode":-3,"errmsg":"invalid method"}`)
+					}
+				} else {
+					//
+					fmt.Fprint(w, `{"errcode":-4,"errmsg":"no such client"}`)
+				}
+			} else {
+				//
+				fmt.Fprint(w, `{"errcode":-3,"errmsg":"invalid method"}`)
+			}
+		} else {
+			//
+			w.WriteHeader(http.StatusBadRequest)
+		}
+		//
+		return
 	}
 
 	http.NotFound(w, r)
@@ -2237,6 +2369,7 @@ func main() {
 	flag.BoolVar(&help, "h", false, "This Help.")
 	flag.StringVar(&addrWol, "l", ":4000", "wol listen address.")
 	flag.StringVar(&addrHttp, "p", ":80", "http listen address.")
+	flag.StringVar(&recordURL, "r", "", "local record url.")
 	flag.StringVar(&oauthList, "o", "", "github OAuth node list.")
 
 	flag.StringVar(&corpID, "cid", "", "（企业微信）企业ID.")
