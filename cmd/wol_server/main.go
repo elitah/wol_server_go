@@ -754,7 +754,7 @@ type WolClient struct {
 
 	Admin string
 
-	warnCnt uint64
+	warnCnt uint32
 
 	warnFlag uint32
 
@@ -794,7 +794,7 @@ func (this *WolClient) WarnStart(devid string) bool {
 	//
 	if atomic.CompareAndSwapUint32(&this.warnFlag, 0x0, 0x1) {
 		//
-		atomic.AddUint64(&this.warnCnt, 1)
+		atomic.AddUint32(&this.warnCnt, 1)
 		//
 		exit := make(chan struct{})
 		//
@@ -816,7 +816,7 @@ func (this *WolClient) WarnStart(devid string) bool {
 							//
 							if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 								//
-								go func(devid, location, title, desp string, cnt uint64) {
+								go func(devid, location, title, desp, cnt uint32) {
 									//
 									_desp := fmt.Sprintf(`设备ID：%s
 位置：%s
