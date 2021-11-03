@@ -129,74 +129,119 @@ func (this *QYWeiXinAPI) Init() {
 	}
 }
 
-func (this *QYWeiXinAPI) SendText(content string) bool {
+func (this *QYWeiXinAPI) GetAccessToken() string {
 	//
 	if 0x0 == atomic.LoadUint32(&this.flag) {
+		//
+		return ""
+	}
+	//
+	for i := 0; 30 > i; i++ {
+		//
+		if "" != this.accessToken {
+			//
+			return this.accessToken
+		}
+		//
+		time.Sleep(time.Second)
+	}
+	//
+	return ""
+}
+
+func (this *QYWeiXinAPI) SendMessage(msgType string, msgPayload interface{}) bool {
+	//
+	var text, video interface{}
+	//
+	accessToken := this.GetAccessToken()
+	//
+	if "" == accessToken {
 		//
 		return false
 	}
 	//
-	for {
+	switch msgType {
+	case "text":
 		//
-		if "" != this.accessToken {
+		text = msgPayload
+	case "video":
+		//
+		video = msgPayload
+	}
+	//
+	if req, err := httplib.Post(fmt.Sprintf(
+		"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s",
+		this.accessToken,
+	)).JSONBody(struct {
+		ToUser                 string      `json:"touser"`
+		ToParty                string      `json:"toparty"`
+		ToTag                  string      `json:"totag"`
+		MsgType                string      `json:"msgtype"`
+		AgentID                int64       `json:"agentid"`
+		Text                   interface{} `json:"text"`
+		Video                  interface{} `json:"video"`
+		Safe                   int64       `json:"safe"`
+		EnableIDTrans          int64       `json:"enable_id_trans"`
+		EnableDuplicateCheck   int64       `json:"enable_duplicate_check"`
+		DuplicateCheckInterval int64       `json:"duplicate_check_interval"`
+	}{
+		ToUser:                 "@all",
+		ToParty:                "@all",
+		ToTag:                  "@all",
+		MsgType:                msgType,
+		AgentID:                this.AppID,
+		Text:                   text,
+		Video:                  video,
+		DuplicateCheckInterval: 1800,
+	}); nil == err {
+		//
+		result := struct {
+			ErrCode     int    `json:"errcode"`
+			ErrMsg      string `json:"errmsg"`
+			InvalidUser string `json:"invaliduser"`
+		}{}
+		//
+		if err := req.ToJSON(&result); nil == err {
 			//
-			if req, err := httplib.Post(fmt.Sprintf(
-				"https://qyapi.weixin.qq.com/cgi-bin/message/send?access_token=%s",
-				this.accessToken,
-			)).JSONBody(struct {
-				ToUser                 string      `json:"touser"`
-				ToParty                string      `json:"toparty"`
-				ToTag                  string      `json:"totag"`
-				MsgType                string      `json:"msgtype"`
-				AgentID                int64       `json:"agentid"`
-				Text                   interface{} `json:"text"`
-				Safe                   int64       `json:"safe"`
-				EnableIDTrans          int64       `json:"enable_id_trans"`
-				EnableDuplicateCheck   int64       `json:"enable_duplicate_check"`
-				DuplicateCheckInterval int64       `json:"duplicate_check_interval"`
-			}{
-				ToUser:  "@all",
-				ToParty: "@all",
-				ToTag:   "@all",
-				MsgType: "text",
-				AgentID: this.AppID,
-				Text: struct {
-					Content string `json:"content"`
-				}{
-					Content: content,
-				},
-				DuplicateCheckInterval: 1800,
-			}); nil == err {
+			if 0 == result.ErrCode && "ok" == result.ErrMsg {
 				//
-				result := struct {
-					ErrCode     int    `json:"errcode"`
-					ErrMsg      string `json:"errmsg"`
-					InvalidUser string `json:"invaliduser"`
-				}{}
-				//
-				if err := req.ToJSON(&result); nil == err {
-					//
-					if 0 == result.ErrCode && "ok" == result.ErrMsg {
-						//
-						return true
-					} else {
-						//
-						logs.Warn(result.ErrCode)
-					}
-				} else {
-					//
-					logs.Warn(err)
-				}
-				//
-				return false
+				return true
 			} else {
 				//
-				logs.Warn(err)
+				logs.Warn(result.ErrCode)
 			}
+		} else {
+			//
+			logs.Warn(err)
 		}
+	} else {
 		//
-		time.Sleep(3 * time.Second)
+		logs.Warn(err)
 	}
+	//
+	return false
+}
+
+func (this *QYWeiXinAPI) SendText(content string) bool {
+	//
+	return this.SendMessage("text", struct {
+		Content string `json:"content"`
+	}{
+		Content: content,
+	})
+}
+
+func (this *QYWeiXinAPI) SendVideo(media_id, title, desc string) bool {
+	//
+	return this.SendMessage("video", struct {
+		MediaID     string `json:"media_id"`
+		Title       string `json:"title"`
+		Description string `json:"description"`
+	}{
+		MediaID:     media_id,
+		Title:       title,
+		Description: desc,
+	})
 }
 
 type OAuthConfig struct {
