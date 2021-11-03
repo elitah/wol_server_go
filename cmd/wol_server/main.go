@@ -1827,7 +1827,7 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 								v.Set("username", response2.UserName)
 								v.Set("userid", fmt.Sprint(response2.UserID))
 								v.Set("nodeid", response2.NodeID)
-								v.Set("avatar_url", response2.AvatarUrl)
+								v.Set("avatar_url", fmt.Sprintf("/headimg?u=%d", response2.UserID))
 								logs.Info(v.Encode())
 								if result, ok := AESEncrypt(this.mAES, "userinfo:"+v.Encode()); ok {
 									http.SetCookie(w, &http.Cookie{
@@ -1875,6 +1875,53 @@ func (this *WolServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		HTMLBody(w, "<h3>已退出</h3>")
 		//
 		return
+	case "/headimg":
+		//
+		if userid := r.FormValue("u"); "" != userid {
+			//
+			if resp, err := httplib.Get(fmt.Sprintf(
+				"https://avatars.githubusercontent.com/u/%s?v=4",
+				userid,
+			)).Response(); nil == err {
+				//
+				defer resp.Body.Close()
+				//
+				if http.StatusOK == resp.StatusCode {
+					//
+					var buffer [1024]byte
+					//
+					header := w.Header()
+					//
+					for key, values := range resp.Header {
+						//
+						switch key {
+						case "Content-Type":
+						case "Content-Length":
+						case "Date":
+						case "Last-Modified":
+						case "Expires":
+						case "Cache-Control":
+						case "Connection":
+						default:
+							//
+							key = ""
+						}
+						//
+						if "" != key {
+							//
+							for _, item := range values {
+								//
+								header.Add(key, item)
+							}
+						}
+					}
+					//
+					io.CopyBuffer(w, resp.Body, buffer[:])
+					//
+					return
+				}
+			}
+		}
 	}
 
 	http.NotFound(w, r)
@@ -2143,6 +2190,16 @@ func initHttplib(rootCA, proxy string) {
 		ReadWriteTimeout: 15 * time.Second,
 		TLSClientConfig:  _t,
 		Proxy: func(req *http.Request) (*url.URL, error) {
+			//
+			switch req.Host {
+			case "github.com":
+			case "api.github.com":
+			case "avatars.githubusercontent.com":
+			default:
+				//
+				return nil, nil
+			}
+			//
 			return u, nil
 		},
 		Transport: &http.Transport{
