@@ -281,7 +281,7 @@ type WarnStore struct {
 	Desp     string `json:"desp"`
 	Record   struct {
 		Start    string `json:"start"`
-		Duration int    `json:"duration"`
+		Duration []int    `json:"duration"`
 	} `json:"record"`
 }
 
@@ -851,7 +851,7 @@ func (this *WolClient) WarnStart(devid string) bool {
 							//
 							if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 								//
-								go func(devid, location, title, desp, warn_record string, warn_duration int, cnt uint32) {
+								go func(devid, location, title, desp, warn_record string, warn_duration []int, cnt uint32) {
 									//
 									_desp := fmt.Sprintf(`设备ID：%s
 位置：%s
@@ -871,33 +871,29 @@ func (this *WolClient) WarnStart(devid string) bool {
 									//
 									qywx.SendText(title + "\n\n" + _desp)
 									//
-									if "" != warn_record {
+									if "" != recordURL && "" != warn_record && 0 < len(warn_duration) {
 										//
-										if u, err := url.Parse(recordURL); nil == err {
+										req := httplib.Get(warn_record)
+										//
+										req.Param("url", recordURL)
+										//
+										req.Param("devid", devid)
+										//
+										req.Param("duration", fmt.Sprint(warn_duration[0]))
+										//
+										for i, item := range warn_duration[1:] {
 											//
-											if "" != u.Scheme && "" != u.Host {
-												//
-												u.Path = "/warn"
-												//
-												if resp, err := httplib.Get(warn_record).Param(
-													"url", u.String(),
-												).Param(
-													"devid", devid,
-												).Param(
-													"duration", fmt.Sprint(warn_duration),
-												).Response(); nil == err {
-													//
-													resp.Body.Close()
-													//
-													logs.Info("Get %s: %d", resp.Request.URL.String(), resp.StatusCode)
-												} else {
-													//
-													logs.Warn(err)
-												}
-											} else {
-												//
-												logs.Info("no scheme or host", u.String())
-											}
+											req.Param(
+												fmt.Sprintf("duration%d", i+1),
+												fmt.Sprint(item),
+											)
+										}
+										//
+										if resp, err := req.Response(); nil == err {
+											//
+											resp.Body.Close()
+											//
+											logs.Info("Get %s: %d", resp.Request.URL.String(), resp.StatusCode)
 										} else {
 											//
 											logs.Warn(err)
@@ -2403,6 +2399,31 @@ func main() {
 		panicError("无法创建协程池", err)
 
 		defer p.Release()
+
+		if "" != recordURL {
+			//
+			switch {
+			default:
+				//
+				if u, err := url.Parse(recordURL); nil == err {
+					//
+					if "" != u.Scheme && "" != u.Host {
+						//
+						u.Path = "/warn"
+						//
+						u.RawQuery = ""
+						//
+						u.Fragment = ""
+						//
+						recordURL = u.String()
+						//
+						break
+					}
+				}
+				//
+				recordURL = ""
+			}
+		}
 
 		if "" != corpID && 0 < appID && "" != appSecret {
 			//
