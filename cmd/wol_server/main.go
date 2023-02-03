@@ -279,9 +279,10 @@ type WarnStore struct {
 	Location string `json:"location"`
 	Title    string `json:"title"`
 	Desp     string `json:"desp"`
+	URL      string `json:"url"`
 	Record   struct {
 		Start    string `json:"start"`
-		Duration []int    `json:"duration"`
+		Duration []int  `json:"duration"`
 	} `json:"record"`
 }
 
@@ -851,9 +852,36 @@ func (this *WolClient) WarnStart(devid string) bool {
 							//
 							if "" != j.Warns[i].Key && "" != j.Warns[i].Title && "" != j.Warns[i].Desp {
 								//
-								go func(devid, location, title, desp, warn_record string, warn_duration []int, cnt uint32) {
+								go func(devid, location, title, desp, url_detail, warn_record string, warn_duration []int, cnt uint32) {
 									//
-									_desp := fmt.Sprintf(`设备ID：%s
+									if "" != url_detail {
+										//
+										switch {
+										default:
+											//
+											if u, err := url.Parse(url_detail); nil == err {
+												//
+												if "" != u.Scheme && "" != u.Host {
+													//
+													u.Path = "/device"
+													//
+													u.RawQuery = "devid="
+													//
+													desp = fmt.Sprintf(
+														`%s
+
+<a href="%s%s">查看报警详情</a>`,
+														desp,
+														u.String(),
+														devid,
+													)
+												}
+											}
+										}
+									}
+									//
+									_desp := fmt.Sprintf(
+										`设备ID：%s
 位置：%s
 时间：%s
 报警次数：第%d次
@@ -955,15 +983,30 @@ func (this *WolClient) WarnStart(devid string) bool {
 									devid, j.Warns[i].Location,
 									j.Warns[i].Title,
 									j.Warns[i].Desp,
+									j.Warns[i].URL,
 									j.Warns[i].Record.Start,
 									j.Warns[i].Record.Duration,
 									this.warnCnt,
 								)
+							} else {
+								//
+								logs.Warn("no warn content")
 							}
+							//
+							break
 						}
 					}
+				} else {
+					//
+					logs.Warn("invalid user profile:", err)
 				}
+			} else {
+				//
+				logs.Warn("no such user profile")
 			}
+		} else {
+			//
+			logs.Warn("no device admin")
 		}
 		//
 		go func(exit chan struct{}) {
@@ -2363,6 +2406,7 @@ func main() {
 	var proxy string
 
 	flag.BoolVar(&help, "h", false, "This Help.")
+	flag.StringVar(&exeDir, "w", exeDir, "work dir.")
 	flag.StringVar(&addrWol, "l", ":4000", "wol listen address.")
 	flag.StringVar(&addrHttp, "p", ":80", "http listen address.")
 	flag.StringVar(&recordURL, "r", "", "local record url.")
